@@ -1,0 +1,171 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+from copy import deepcopy
+
+
+np.random.seed(0)
+torch.manual_seed(0)
+
+tot = np.zeros((5,9))
+print("hello")
+for m in range(5):
+
+    data = np.load("dataset/Neural_Network_1d_SGD/Sample_{}/sample.npy".format(m+1))
+
+# data = np.load("dataset/Least_Squares_3d_GD/Sample_1/sample.npy")
+
+    data_tr = data[:100,:,:]
+    data_val = data[100:150,:,:]
+    data_te = data[150:,:,:]
+    
+    tr_diff = np.sum(np.abs(data_tr[:,0,:] - data_tr[:,1,:]),axis=1)
+
+    k = 2 # --> correponding to len(t) which is last two
+
+    def get_batch_n(data,batch_size, k):
+    #     if data.shape[2] > 20:
+    #         outputb = np.zeros((batch_size,4, 20))
+    #         outputl = np.zeros((batch_size,1, 20))
+    #     else: 
+        outputb = np.zeros((batch_size, k, data.shape[2]))
+        outputl = np.zeros((batch_size, 180, data.shape[2]))
+        indices = np.arange(len(data))
+        for i in range(batch_size):
+            index = indices[i]
+            b,l = get_batch(data[index,:,:])
+            outputb[i,:,:] = b
+            outputl[i,:,:] = l
+
+        return outputb, outputl
+
+
+    def get_batch(train_data):
+
+
+        data_width = train_data.shape[1]
+
+        t = [0,20] # hard coded 
+        batch = train_data[t,:]
+        batch_indices = np.arange(data_width)
+        labels = train_data[t[-1]+1:, :]
+
+        return batch, labels
+
+
+    tr_W1, tr_W2 = get_batch_n(data_tr,len(data_tr),k)
+    tr_W1, tr_W2  = np.transpose(tr_W1, (0,2,1)),np.transpose(tr_W2, (0,2,1))
+    val_W1, val_W2 = get_batch_n(data_val,len(data_val),k)
+    val_W1, val_W2  = np.transpose(val_W1, (0,2,1)),np.transpose(val_W2, (0,2,1))
+    te_W1, te_W2 = get_batch_n(data_te,len(data_te),k)
+    te_W1, te_W2  = np.transpose(te_W1, (0,2,1)),np.transpose(te_W2, (0,2,1))
+
+
+    # Convert numpy arrays to PyTorch tensors
+    X_tensor = torch.from_numpy(tr_W1).float()
+    y_tensor = torch.from_numpy(tr_W2).float()
+
+    X_tensor_val = torch.from_numpy(val_W1).float()
+    y_tensor_val = torch.from_numpy(val_W2).float()
+
+    X_tensor_te = torch.from_numpy(te_W1).float()
+    y_tensor_te = torch.from_numpy(te_W2).float()
+    
+    grad_diff_tensor_tr = torch.from_numpy(tr_diff).float()
+
+    # Define the linear regression model
+    class LinearRegressionModel(nn.Module):
+        def __init__(self, input_size,output_size):
+            super(LinearRegressionModel, self).__init__()
+            self.linear = nn.Linear(input_size, output_size)
+
+        def forward(self, x):
+            return self.linear(x)
+
+    input_size = tr_W1.shape[2]
+
+    output_size = tr_W2.shape[2]
+
+    #learn_rate = 0.004 #, 3d gd
+    #learn_rate = 0.006 # , 3d sgd
+    learn_rate = 0.0055#, nn 1d sgd
+    #learn_rate = 0.004 #, nn 1d adam
+
+
+    model = LinearRegressionModel(input_size,output_size)
+
+    # Loss and optimizer
+    optimizer = optim.Adam(model.parameters(), lr=learn_rate)
+
+    # Training the model
+    num_epochs = 10000
+
+    #batchsize
+    batch_size = 32
+
+    best_val_loss = float('inf')
+    best_model = deepcopy(model.state_dict())
+    val_loss_list = [] 
+    impatient = 0 
+    
+    # beta = 0.0001 , 3d gd
+    beta = 0.000001 # all others
+
+    for epoch in range(num_epochs):
+        # Forward pass
+        indices = torch.randperm(len(X_tensor))
+
+        for i in range(0, len(X_tensor), batch_size):
+            batch_indices = indices[i:i+batch_size]
+
+            outputs = model( X_tensor[batch_indices])
+            
+            predict_grad_diff = torch.sum(torch.abs(outputs[:,:,-1] - outputs[:,:,-2]),axis =1)
+        
+        
+            penalty = torch.mean(torch.relu( predict_grad_diff - grad_diff_tensor_tr[batch_indices] ))  
+
+            # Compute the loss : 
+            loss = torch.squeeze(torch.mean(torch.abs(outputs - y_tensor[batch_indices]))) +  beta * penalty
+
+
+            # Backward and optimize
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        #tr_loss = torch.squeeze(torch.mean(torch.abs(model(X_tensor) - y_tensor)))
+        val_loss= torch.squeeze(torch.mean(torch.abs(model(X_tensor_val) - y_tensor_val)))
+        #print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {tr_loss.item():.10f}, val Loss: {val_loss.item():.10f} ')
+
+        if  val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model = deepcopy(model.state_dict())
+                impatient = 0 # reset
+        else:
+            impatient += 1
+
+
+        if impatient >= 5:
+            print(f'Breaking due to early stopping at epoch {epoch}')
+            break
+
+
+    # evaluate
+    model.load_state_dict(best_model)
+
+    model.eval()
+
+    pred = model(X_tensor_te)
+
+    for k in [2,3,4,5,6,7,8,9,10]:
+        mse = torch.mean(torch.squeeze(torch.square(pred[:,:,20*(k-1)-1] - y_tensor_te[:,:,20*(k-1)-1])))
+        tot[m,k-2] = mse
+        print("mse of test samples {} at predicting time step {} ".format(mse, k*20 ) )
+
+
+for i in range(len(tot[0])):
+    print("{}({})".format( np.mean(tot,axis =0)[i], np.std(tot,axis=0)[i]) )
